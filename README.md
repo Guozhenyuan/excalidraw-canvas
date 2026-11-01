@@ -16,7 +16,7 @@ GitHub Pages 托管编辑器，另一个私有 GitHub 仓库保存 `.excalidraw`
 
 素材面板 →「浏览素材库」→ 在官方目录点「Add to Excalidraw」。返回地址保留当前画布、仓库、分支及只读模式；独立窗口会尽量返回原编辑标签页，通过网址片段导入素材，不重置画布。若浏览器另开了标签页，仍使用该画布链接恢复，可能需要确认导入或重新连接；原标签页里的未保存内容仍在原页。
 
-导入使用 Excalidraw 官方 `useHandleLibrary`，处理首次返回和编辑期间的跳转，并校验素材来源。素材增删保存于当前浏览器（存储受限时会提示）。Notion 嵌入受浏览器窗口定位、弹窗和存储分区限制；遇到限制请用「独立窗口」完成导入。连接凭据不会被带到素材站或写入返回网址。
+导入使用 Excalidraw 官方 `useHandleLibrary`，处理首次返回和编辑期间的跳转，并校验素材来源。正式站点的 CSP 仅新增允许连接官方素材目录 `https://libraries.excalidraw.com/libraries/` 和官方 GitHub 素材仓库 `https://raw.githubusercontent.com/excalidraw/excalidraw-libraries/`，未开放任意外站或远程脚本。素材导入验证应使用带正式 CSP 的构建，不能仅验证开发测试页。素材增删保存于当前浏览器（存储受限时会提示）。Notion 嵌入受浏览器窗口定位、弹窗和存储分区限制；遇到限制请用「独立窗口」完成导入。连接凭据不会被带到素材站或写入返回网址。
 
 ## 自动同步
 
