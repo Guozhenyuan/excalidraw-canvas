@@ -11,11 +11,15 @@ import { directoryOf, filenameOf, drawingPath, directoryChoices } from './paths'
 import RepositoryFiles from './RepositoryFiles';
 import SyncControls from './SyncControls';
 import DataVizLibrary from './DataVizLibrary';
+import { libraryReturnURL, libraryStartupURL } from './library';
+import { useCanvasLibrary } from './useCanvasLibrary';
 import { synchronizeRemote, SYNC_INTERVAL, retryDelay } from './sync';
 window.EXCALIDRAW_ASSET_PATH = new URL('./', location.href).href.split('?')[0].split('#')[0];
 const route = readRoute(location.href);
 const readonly = route.readonly;
-history.replaceState(null, '', canvasURL(location.href, route));
+history.replaceState(null, '', libraryStartupURL(location.href));
+// Reuse the editor tab when the catalogue returns, preserving in-memory edits.
+if (window.self === window.top && !/^privatecanvas[\w-]+$/.test(window.name)) window.name = `privatecanvas${crypto.randomUUID().replaceAll('-', '')}`;
 function App() {
   const [api, setApi] = useState(null), [connected, setConnected] = useState(false), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(true), [remember, setRemember] = useState(true), [remembered, setRemembered] = useState(false);
@@ -29,6 +33,7 @@ function App() {
   const [owner, setOwner] = useState(route.owner), [repo, setRepo] = useState(route.repo), [branch, setBranch] = useState(route.branch);
   const [canvasPath, setCanvasPath] = useState(route.file), [ready, setReady] = useState(false);
   const tokenInput = useRef(null), client = useRef(null), loaded = useRef(null), baseline = useRef(null), observed = useRef(null), timer = useRef(null), lock = useRef(false), dirtyRef = useRef(false), startup = useRef(false);
+  const canvasLibrary = useCanvasLibrary(api);
   const serialized = () => serializeAsJSON(api.getSceneElements(), api.getAppState(), api.getFiles(), 'local');
   const refreshDirty = () => {
     if (!api) return;
@@ -281,7 +286,7 @@ function App() {
   const name = canvasPath ? canvasPath.split('/').pop().replace(/\.excalidraw$/, '').replace(/-[a-f0-9]{8}$/, '') : '我的画布';
   const stateLabel = syncing ? '正在检查同步…' : checking ? '正在连接' : busy ? '正在加载' : saving ? '正在保存…' : paused ? '同步已暂停' : dirty ? (syncEnabled ? '等待保存…' : '有未保存修改') : ready ? '已同步 GitHub' : connected ? '已连接' : '未连接';
   return <div className="shell">
-    <header><div className="brand"><span className="logo">✎</span><strong title={canvasPath || name}>{name}</strong></div><span className={'badge ' + (paused ? 'warning' : connected ? 'online' : '')} role="status">{stateLabel}</span><div className="header-actions"><DataVizLibrary api={api} disabled={blocked || !ready || readonly} onOpen={() => setPanel(null)} onError={setStatus}/>{!readonly && <button onClick={() => save()} disabled={blocked || !connected || !ready}>{saving ? '保存中…' : '保存'}</button>}<button onClick={copyLink} disabled={!canvasPath || busy}>复制链接</button><button onClick={() => setPanel(panel ? null : connected ? 'files' : 'connect')} disabled={blocked}>☰</button></div></header>
+    <header><div className="brand"><span className="logo">✎</span><strong title={canvasPath || name}>{name}</strong></div><span className={'badge ' + (paused ? 'warning' : connected ? 'online' : '')} role="status">{stateLabel}</span><div className="header-actions"><DataVizLibrary api={api} libraryLoaded={canvasLibrary.loaded} disabled={blocked || !ready || readonly} onOpen={() => setPanel(null)} onError={setStatus}/>{!readonly && <button onClick={() => save()} disabled={blocked || !connected || !ready}>{saving ? '保存中…' : '保存'}</button>}<button onClick={copyLink} disabled={!canvasPath || busy}>复制链接</button><button onClick={() => setPanel(panel ? null : connected ? 'files' : 'connect')} disabled={blocked}>☰</button></div></header>
     {panel && <section className="drawer" aria-label="画布管理">
       <div className="drawer-top"><strong>{panel === 'connect' ? '连接你的 GitHub' : '我的画布'}</strong><button onClick={() => setPanel(null)}>收起 ×</button></div>
       {panel === 'connect' ? <><p className="intro">只需设置一次。选择记住连接后，本浏览器下次打开画布会自动加载。图稿保存在你的私有仓库。</p><form onSubmit={connect} className="connect-form">
@@ -294,10 +299,10 @@ function App() {
         <div className="drawer-bottom"><button onClick={() => setPanel('connect')} disabled={blocked}>账户与连接</button><a href={makeLink()} target="_blank" rel="noopener noreferrer">独立窗口 ↗</a></div>
       </>}
     </section>}
-    <main className="canvas" onPointerDownCapture={() => { pointerActive.current = true; }}><Excalidraw excalidrawAPI={setApi} langCode="zh-CN" viewModeEnabled={readonly || busy || checking || !ready} onChange={() => { clearTimeout(timer.current); if (!busy && !checking && ready) timer.current = setTimeout(refreshDirty, 250); }} validateEmbeddable={() => false} UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false, export: { saveFileToDisk: true } } }}><MainMenu><MainMenu.DefaultItems.Export/><MainMenu.DefaultItems.SaveAsImage/><MainMenu.DefaultItems.ChangeCanvasBackground/></MainMenu></Excalidraw>
+    <main className="canvas" onPointerDownCapture={() => { pointerActive.current = true; }}><Excalidraw libraryReturnUrl={libraryReturnURL(makeLink())} excalidrawAPI={setApi} langCode="zh-CN" viewModeEnabled={readonly || busy || checking || !ready} onChange={() => { clearTimeout(timer.current); if (!busy && !checking && ready) timer.current = setTimeout(refreshDirty, 250); }} validateEmbeddable={() => false} UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false, export: { saveFileToDisk: true } } }}><MainMenu><MainMenu.DefaultItems.Export/><MainMenu.DefaultItems.SaveAsImage/><MainMenu.DefaultItems.ChangeCanvasBackground/></MainMenu></Excalidraw>
       {!ready && !panel && <div className="welcome"><h1>{checking ? '正在打开画布…' : route.file ? name : '每个想法，一张画布。'}</h1><p>{checking ? '正在读取此浏览器记住的连接。' : connected ? '新建画布，或者打开已有图稿。' : '连接一次 GitHub，随后自动保存你的修改。'}</p>{!checking && <button className="primary" onClick={() => setPanel(connected ? 'files' : 'connect')}>{connected ? '打开我的画布' : '连接 GitHub'}</button>}</div>}
     </main>
-    <footer><span role="status" aria-live="polite">{syncNotice || status}</span>{paused && ready && <><button onClick={() => save()} disabled={blocked || !connected || readonly}>重试保存</button>{path && <button onClick={() => load(path)} disabled={blocked || !connected}>读取远端版本</button>}<button onClick={() => { setSaveName(filenameOf(path).replace(/\.excalidraw$/, '') + '-副本.excalidraw'); setPanel('files'); }} disabled={blocked || !connected || readonly}>另存副本</button><button onClick={download}>下载备份</button></>}</footer>
+    <footer><span role="status" aria-live="polite">{canvasLibrary.notice || syncNotice || status}</span>{paused && ready && <><button onClick={() => save()} disabled={blocked || !connected || readonly}>重试保存</button>{path && <button onClick={() => load(path)} disabled={blocked || !connected}>读取远端版本</button>}<button onClick={() => { setSaveName(filenameOf(path).replace(/\.excalidraw$/, '') + '-副本.excalidraw'); setPanel('files'); }} disabled={blocked || !connected || readonly}>另存副本</button><button onClick={download}>下载备份</button></>}</footer>
   </div>;
 }
 createRoot(document.getElementById('root')).render(<App/>);
