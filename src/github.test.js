@@ -50,3 +50,7 @@ test('new-file timeout is confirmed without duplicate creation',async()=>{
  }});
  assert.equal((await c.save('目录/新图.excalidraw',drawing)).content.sha,'created');assert.equal(writes,1);
 });
+test('repeated directory polling uses ETag and reuses a 304 response without decoding a body',async()=>{
+ let calls=[];const c=createGithub({...config,fetcher:async(url,options)=>{calls.push(options);return calls.length===1?{...reply({tree:[],truncated:false}),headers:{get:name=>name==='etag'?'"repository-v1"':null}}:{ok:false,status:304,json:()=>assert.fail('304 has no JSON body')}}});
+ assert.deepEqual(await c.list(),await c.list());assert.equal(calls[1].headers['If-None-Match'],'"repository-v1"');assert.equal(calls[1].conditional,undefined);
+});

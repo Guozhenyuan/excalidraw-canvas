@@ -25,13 +25,22 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const identity = `${owner}/${repo}@${branch}`;
   const pending = new Map();
+  const conditionalCache = new Map();
   async function request(suffix, options = {}) {
-    const response = await fetcher(base + suffix, { ...options, signal: AbortSignal.timeout(30000), credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+    const { conditional, ...fetchOptions } = options;
+    const cached = conditional ? conditionalCache.get(suffix) : null;
+    const response = await fetcher(base + suffix, { ...fetchOptions, signal: AbortSignal.timeout(30000), credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(cached?.etag ? { 'If-None-Match': cached.etag } : {}), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+    if (response.status === 304 && cached) return cached.data;
     if (!response.ok) {
       const messages = { 401: '令牌无效或已过期，请重新连接。', 403: '权限不足或请求受限。请检查令牌所选仓库、Contents 权限、组织审批和 API 限额。', 404: '文件、分支或仓库不存在，或令牌没有访问权限。', 409: '远端已变化，保存被阻止。请下载当前备份，再加载远端版本合并。', 422: '保存被拒绝，可能文件已存在或分支受保护。请先备份并重新加载。' };
-      const error = new Error(messages[response.status] || `GitHub 请求失败（${response.status}），请重试。`); error.status = response.status; throw error;
+      const error = new Error(messages[response.status] || `GitHub 请求失败（${response.status}），请重试。`); error.status = response.status;
+      const retryAfter = Number(response.headers?.get('retry-after'));
+      const reset = response.headers?.get('x-ratelimit-remaining') === '0' ? Number(response.headers?.get('x-ratelimit-reset')) * 1000 : 0;
+      error.retryAt = Math.max(reset || 0, retryAfter > 0 ? Date.now() + retryAfter * 1000 : 0); throw error;
     }
-    return response.json();
+    const data = await response.json();
+    if (conditional) conditionalCache.set(suffix, { etag: response.headers?.get('etag'), data });
+    return data;
   }
   const fileURL = path => `/contents/${validatePath(path).split('/').map(encodeURIComponent).join('/')}`;
   return {
@@ -39,8 +48,13 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
     ...createFileOperations({ request, branch, validatePath }),
     async verify() { const result = await request(''); if (!result.private) throw new Error('为保护图稿，本站只连接私有仓库。'); return result; },
     async list() {
-      const tree = await request(`/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+      const tree = await request(`/git/trees/${encodeURIComponent(branch)}?recursive=1`, { conditional: true });
       return { paths: tree.tree.filter(x => x.type === 'blob' && x.path.endsWith('.excalidraw')).map(x => x.path), versions: Object.fromEntries(tree.tree.filter(x => x.type === 'blob' && x.path.endsWith('.excalidraw')).map(x => [x.path, x.sha])), directories: tree.tree.filter(x => x.type === 'tree').map(x => x.path), truncated: !!tree.truncated };
+    },
+    async version(path) {
+      const meta = await request(fileURL(path) + `?ref=${encodeURIComponent(branch)}`);
+      if (meta.type !== 'file' || !meta.sha) throw new Error('远端路径不再是普通图稿文件。');
+      return meta.sha;
     },
     async load(path) {
       const meta = await request(fileURL(path) + `?ref=${encodeURIComponent(branch)}`);
