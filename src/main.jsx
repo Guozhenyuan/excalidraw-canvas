@@ -17,6 +17,7 @@ function App() {
   const [api, setApi] = useState(null), [connected, setConnected] = useState(false), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(true), [remember, setRemember] = useState(true), [remembered, setRemembered] = useState(false);
   const [panel, setPanel] = useState(null), [path, setPath] = useState(route.file), [files, setFiles] = useState([]), [newTitle, setNewTitle] = useState('');
+  const [versions, setVersions] = useState({});
   const [directories, setDirectories] = useState([]), [folder, setFolder] = useState(directoryOf(route.file)), [saveName, setSaveName] = useState('未命名画布.excalidraw');
   const [refreshing, setRefreshing] = useState(false), [listNotice, setListNotice] = useState('');
   const [status, setStatus] = useState('正在检查连接…'), [dirty, setDirty] = useState(false), [revision, setRevision] = useState(0), [paused, setPaused] = useState(false);
@@ -102,7 +103,7 @@ function App() {
   async function refreshRepository(connection = client.current) {
     if (!connection || refreshing) return;
     setRefreshing(true);
-    try { const list = await connection.list(); setFiles(list.paths); setDirectories(list.directories); setListNotice(list.truncated ? '仓库内容较多，列表可能不完整。同名文件仍受保护，可粘贴 GitHub 地址定位目录。' : ''); }
+    try { const list = await connection.list(); setFiles(list.paths); setVersions(list.versions); setDirectories(list.directories); setListNotice(list.truncated ? '仓库内容较多，列表可能不完整。同名文件仍受保护，可粘贴 GitHub 地址定位目录。' : ''); }
     catch { setListNotice('目录读取失败，请点“刷新目录”重试。当前画布保存不受影响。'); }
     finally { setRefreshing(false); }
   }
@@ -117,7 +118,7 @@ function App() {
     if (!safeReplace()) return;
     await run(async () => {
       let cleared = true; try { await forgetConnection(); } catch { cleared = false; }
-      client.current = null; loaded.current = null; setConnected(false); setRemembered(false); setReady(false); setPaused(false); setFiles([]); setDirectories([]);
+      client.current = null; loaded.current = null; setConnected(false); setRemembered(false); setReady(false); setPaused(false); setFiles([]); setVersions({}); setDirectories([]);
       await applyDrawing({ type: 'excalidraw', version: 2, elements: [], appState: {}, files: {} });
       setPanel('connect'); setStatus(cleared ? '已退出并清除此浏览器的连接记录。' : '本页已退出，但无法清除本机记录。请在浏览器设置中清除本站数据，再重新打开。');
     });
@@ -131,7 +132,7 @@ function App() {
       const result = await client.current.save(file, text);
       await applyDrawing(parseDrawing(text));
       loaded.current = { path: file, sha: result.content.sha, identity: client.current.identity };
-      setPath(file); updateCanvasLink(file); setSaveName(filenameOf(file)); setFiles(old => [...old, file].sort()); setReady(true); setPanel(null); setPaused(false); setNewTitle(''); setStatus('画布已创建 · 修改后自动保存');
+      setVersions(old => ({ ...old, [file]: result.content.sha })); setPath(file); updateCanvasLink(file); setSaveName(filenameOf(file)); setFiles(old => [...old, file].sort()); setReady(true); setPanel(null); setPaused(false); setNewTitle(''); setStatus('画布已创建 · 修改后自动保存');
     });
   }
   async function save(automatic = false, destination = path) {
@@ -144,11 +145,52 @@ function App() {
       const sha = previous?.path === valid && previous.identity === client.current.identity ? previous.sha : undefined;
       const result = await client.current.save(valid, snapshot, sha);
       loaded.current = { path: valid, sha: result.content.sha, identity: client.current.identity };
-      baseline.current = snapshot; setPath(valid); updateCanvasLink(valid); if (valid !== path) { setFolder(directoryOf(valid)); setSaveName(filenameOf(valid)); } setReady(true); setPaused(false);
+      setVersions(old => ({ ...old, [valid]: result.content.sha })); baseline.current = snapshot; setPath(valid); updateCanvasLink(valid); if (valid !== path) { setFolder(directoryOf(valid)); setSaveName(filenameOf(valid)); } setReady(true); setPaused(false);
       setFiles(old => old.includes(valid) ? old : [...old, valid].sort());
       setStatus((result.recovered ? '已核对 GitHub，保存成功 · ' : '已保存到 GitHub · ') + valid + ' · ' + new Date().toLocaleTimeString());
     } catch (e) { showError(e); }
     finally { lock.current = false; setSaving(false); refreshDirty(); }
+  }
+  async function manageFile(action) {
+    if (lock.current || !client.current || readonly) throw new Error('请等待当前操作完成后重试。');
+    lock.current = true; setBusy(true); clearTimeout(timer.current);
+    try { return await action(); }
+    catch (e) { showError(e); throw e; }
+    finally { lock.current = false; setBusy(false); refreshDirty(); }
+  }
+  async function renameFile(from, to, expectedSHA) {
+    return manageFile(async () => {
+      const isCurrent = ready && loaded.current?.path === from && loaded.current.identity === client.current.identity;
+      let sha = isCurrent ? loaded.current.sha : expectedSHA;
+      if (isCurrent && baseline.current !== serialized()) {
+        const snapshot = serialized();
+        const result = await client.current.save(from, snapshot, sha);
+        sha = result.content.sha; loaded.current = { ...loaded.current, sha }; baseline.current = snapshot;
+        setVersions(old => ({ ...old, [from]: sha }));
+      }
+      const result = await client.current.rename(from, to, sha);
+      setFiles(old => [...old.filter(file => file !== from), to].sort());
+      setVersions(old => { const next = { ...old, [to]: result.sha }; delete next[from]; return next; });
+      if (isCurrent) {
+        loaded.current = { path: to, sha: result.sha, identity: client.current.identity };
+        setPath(to); updateCanvasLink(to); setSaveName(filenameOf(to)); setPaused(false);
+      }
+      setFolder(directoryOf(to));
+      setStatus('已重命名为 ' + to + '。请更新原先使用的画布链接。');
+    });
+  }
+  async function deleteFile(file, expectedSHA) {
+    return manageFile(async () => {
+      const isCurrent = ready && loaded.current?.path === file && loaded.current.identity === client.current.identity;
+      await client.current.remove(file, isCurrent ? loaded.current.sha : expectedSHA);
+      setFiles(old => old.filter(item => item !== file));
+      setVersions(old => { const next = { ...old }; delete next[file]; return next; });
+      if (isCurrent) {
+        loaded.current = null; setPath(''); updateCanvasLink(''); setSaveName(filenameOf(file).replace(/\.excalidraw$/, '') + '-副本.excalidraw');
+        baseline.current = ''; setPaused(true); setPanel('files');
+      }
+      setStatus('已从 GitHub 删除 ' + file + (isCurrent ? '。页面内容仍保留，可下载备份或另存；不会自动重新创建文件。' : '。'));
+    });
   }
   function download() {
     const url = URL.createObjectURL(new Blob([serialized()], { type: 'application/json' }));
@@ -168,7 +210,7 @@ function App() {
     try { await navigator.clipboard.writeText(makeLink()); setStatus('画布链接已复制，可直接用于 Notion Embed。'); }
     catch { setStatus('复制被浏览器限制，请复制地址栏中的画布网址。'); }
   }
-  const blocked = busy || saving || checking;
+  const blocked = busy || saving || checking || refreshing;
   const name = canvasPath ? canvasPath.split('/').pop().replace(/\.excalidraw$/, '').replace(/-[a-f0-9]{8}$/, '') : '我的画布';
   const stateLabel = checking ? '正在连接' : busy ? '正在加载' : saving ? '正在保存…' : paused ? '同步已暂停' : dirty ? '等待保存…' : ready ? '已同步 GitHub' : connected ? '已连接' : '未连接';
   return <div className="shell">
@@ -180,7 +222,7 @@ function App() {
         {!connected && <><a className="setup-link" href="https://github.com/settings/personal-access-tokens/new?name=Private%20Canvas&target_name=Guozhenyuan&expires_in=30&contents=write" target="_blank" rel="noopener noreferrer">① 在 GitHub 创建连接凭据 ↗</a><p className="help">名称、30 天有效期和 Contents 读写权限已预填。请在 Repository access 选择 Only select repositories，仅勾选 excalidraw-drawings，再点击 Generate token。不要把生成的凭据发到聊天。</p><label>② 粘贴 GitHub 生成的连接凭据<input ref={tokenInput} type="password" autoComplete="off" required disabled={blocked} spellCheck="false"/></label><label className="remember"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)}/>在此浏览器记住连接（最多 30 天）</label><p className="help">这会将访问凭据保存在本机浏览器中；其他使用此浏览器的人也可能访问。换设备、令牌过期或清除网站数据后需重新连接。</p><button className="primary" disabled={blocked || !api}>连接并打开画布</button></>}
         {connected && <><p>{remembered ? '本浏览器已记住连接。' : '当前连接仅在本次页面中保留。'}</p><button type="button" onClick={disconnect} disabled={blocked}>退出并清除连接</button></>}
       </form></> : <>
-        <RepositoryFiles directories={directories} files={files} folder={folder} setFolder={setFolder} newTitle={newTitle} setNewTitle={setNewTitle} saveName={saveName} setSaveName={setSaveName} activePath={path} ready={ready} blocked={blocked} readonly={readonly} createCanvas={createCanvas} saveAs={file => save(false, file)} load={load} refresh={() => refreshRepository()} refreshing={refreshing} listNotice={listNotice} config={{ owner, repo, branch }} download={download} importFile={importFile}/>
+        <RepositoryFiles directories={directories} files={files} versions={versions} renameFile={renameFile} deleteFile={deleteFile} folder={folder} setFolder={setFolder} newTitle={newTitle} setNewTitle={setNewTitle} saveName={saveName} setSaveName={setSaveName} activePath={path} ready={ready} blocked={blocked} readonly={readonly} createCanvas={createCanvas} saveAs={file => save(false, file)} load={load} refresh={() => refreshRepository()} refreshing={refreshing} listNotice={listNotice} config={{ owner, repo, branch }} download={download} importFile={importFile}/>
         <div className="drawer-bottom"><button onClick={() => setPanel('connect')} disabled={blocked}>账户与连接</button><a href={makeLink()} target="_blank" rel="noopener noreferrer">独立窗口 ↗</a></div>
       </>}
     </section>}
