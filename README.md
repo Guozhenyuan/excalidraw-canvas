@@ -4,6 +4,14 @@
 
 GitHub Pages 托管编辑器，另一个私有 GitHub 仓库保存 `.excalidraw` 文件。每张画布有固定链接，修改停止约 3 秒后自动保存。没有多人实时协作；每次成功保存生成一个 Git 提交。
 
+## Data Viz 素材库
+
+已内置 32 个可编辑图表素材。连接并打开或新建画布后，点击顶部「素材库」，在 Excalidraw 素材面板中选取图表并放到画布上；插入的元素通过原有自动保存流程写入你的私有图稿。素材不会自动插入或覆盖当前画布。
+
+素材随网站部署，首次加载无需访问第三方素材站。每次打开网页会加载内置素材，重复打开素材库不会重复添加，也不会替换当前页面已有的其他素材。当前页面中对素材库自身的增删不单独同步到 GitHub；已插入画布的图形会随图稿保存。网络失败时可点「重试素材库」。
+
+来源：[Data Viz by dbs-sticky](https://github.com/excalidraw/excalidraw-libraries/tree/main/libraries/dbssticky)，来自 [Excalidraw Libraries](https://libraries.excalidraw.com/)。上游文件 Git blob：`e6d57fa1f7d75807b87bda712c05854ecfe516e1`。随附 [MIT 授权说明](public/libraries/LICENSE.txt)。
+
 ## 自动同步
 
 连接后默认开启。页面可见时每 30 秒检查 GitHub 的目录和当前画布；切回页面或网络恢复时也会检查，并保留最少请求间隔。菜单中的「自动同步 GitHub」可关闭自动保存和远端检查，开关仅作用于当前页面；「立即同步」仍可手动检查并保存当前修改。新建或导入画布仍需先选择保存位置。

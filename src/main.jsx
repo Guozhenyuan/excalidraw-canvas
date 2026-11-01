@@ -10,6 +10,7 @@ import { canAutoSave } from './autosave';
 import { directoryOf, filenameOf, drawingPath, directoryChoices } from './paths';
 import RepositoryFiles from './RepositoryFiles';
 import SyncControls from './SyncControls';
+import DataVizLibrary from './DataVizLibrary';
 import { synchronizeRemote, SYNC_INTERVAL, retryDelay } from './sync';
 window.EXCALIDRAW_ASSET_PATH = new URL('./', location.href).href.split('?')[0].split('#')[0];
 const route = readRoute(location.href);
@@ -280,7 +281,7 @@ function App() {
   const name = canvasPath ? canvasPath.split('/').pop().replace(/\.excalidraw$/, '').replace(/-[a-f0-9]{8}$/, '') : '我的画布';
   const stateLabel = syncing ? '正在检查同步…' : checking ? '正在连接' : busy ? '正在加载' : saving ? '正在保存…' : paused ? '同步已暂停' : dirty ? (syncEnabled ? '等待保存…' : '有未保存修改') : ready ? '已同步 GitHub' : connected ? '已连接' : '未连接';
   return <div className="shell">
-    <header><div className="brand"><span className="logo">✎</span><strong title={canvasPath || name}>{name}</strong></div><span className={'badge ' + (paused ? 'warning' : connected ? 'online' : '')} role="status">{stateLabel}</span><div className="header-actions">{!readonly && <button onClick={() => save()} disabled={blocked || !connected || !ready}>{saving ? '保存中…' : '保存'}</button>}<button onClick={copyLink} disabled={!canvasPath || busy}>复制链接</button><button onClick={() => setPanel(panel ? null : connected ? 'files' : 'connect')} disabled={blocked}>☰</button></div></header>
+    <header><div className="brand"><span className="logo">✎</span><strong title={canvasPath || name}>{name}</strong></div><span className={'badge ' + (paused ? 'warning' : connected ? 'online' : '')} role="status">{stateLabel}</span><div className="header-actions"><DataVizLibrary api={api} disabled={blocked || !ready || readonly} onOpen={() => setPanel(null)} onError={setStatus}/>{!readonly && <button onClick={() => save()} disabled={blocked || !connected || !ready}>{saving ? '保存中…' : '保存'}</button>}<button onClick={copyLink} disabled={!canvasPath || busy}>复制链接</button><button onClick={() => setPanel(panel ? null : connected ? 'files' : 'connect')} disabled={blocked}>☰</button></div></header>
     {panel && <section className="drawer" aria-label="画布管理">
       <div className="drawer-top"><strong>{panel === 'connect' ? '连接你的 GitHub' : '我的画布'}</strong><button onClick={() => setPanel(null)}>收起 ×</button></div>
       {panel === 'connect' ? <><p className="intro">只需设置一次。选择记住连接后，本浏览器下次打开画布会自动加载。图稿保存在你的私有仓库。</p><form onSubmit={connect} className="connect-form">
