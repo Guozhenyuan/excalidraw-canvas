@@ -5,58 +5,180 @@ import '@excalidraw/excalidraw/index.css';
 import './style.css';
 import { createGithub, parseDrawing, validatePath, MAX_BYTES } from './github';
 import { canvasURL, readRoute } from './routing';
+import { readConnection, rememberConnection, forgetConnection } from './session';
+import { canAutoSave, createDrawingPath } from './autosave';
 window.EXCALIDRAW_ASSET_PATH = new URL('./', location.href).href.split('?')[0].split('#')[0];
 const route = readRoute(location.href);
-const initialPath = route.file;
 const readonly = route.readonly;
 history.replaceState(null, '', canvasURL(location.href, route));
 function App() {
-  const [api, setApi] = useState(null), [connected, setConnected] = useState(false), [busy, setBusy] = useState(false);
-  const [settings, setSettings] = useState(true), [path, setPath] = useState(initialPath), [files, setFiles] = useState([]);
-  const [status, setStatus] = useState(initialPath ? '连接私有仓库后，将自动打开这张画布：' + initialPath : '先连接私有仓库，或直接开始绘图。'), [dirty, setDirty] = useState(false);
+  const [api, setApi] = useState(null), [connected, setConnected] = useState(false), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(true), [remember, setRemember] = useState(true), [remembered, setRemembered] = useState(false);
+  const [panel, setPanel] = useState(null), [path, setPath] = useState(route.file), [files, setFiles] = useState([]), [newTitle, setNewTitle] = useState('');
+  const [status, setStatus] = useState('正在检查连接…'), [dirty, setDirty] = useState(false), [revision, setRevision] = useState(0), [paused, setPaused] = useState(false);
   const [owner, setOwner] = useState(route.owner), [repo, setRepo] = useState(route.repo), [branch, setBranch] = useState(route.branch);
-  const [canvasPath, setCanvasPath] = useState(initialPath);
-  const tokenInput = useRef(null), client = useRef(null), loaded = useRef(null), baseline = useRef(null), timer = useRef(null), lock = useRef(false), dirtyRef = useRef(false);
+  const [canvasPath, setCanvasPath] = useState(route.file), [ready, setReady] = useState(false);
+  const tokenInput = useRef(null), client = useRef(null), loaded = useRef(null), baseline = useRef(null), observed = useRef(null), timer = useRef(null), lock = useRef(false), dirtyRef = useRef(false), startup = useRef(false);
   const serialized = () => serializeAsJSON(api.getSceneElements(), api.getAppState(), api.getFiles(), 'local');
-  const refreshDirty = () => { if (!api) return; const changed = baseline.current !== serialized(); dirtyRef.current = changed; setDirty(changed); };
-  useEffect(() => { const listener = e => { if (dirtyRef.current) { e.preventDefault(); e.returnValue = ''; } }; window.addEventListener('beforeunload', listener); return () => { window.removeEventListener('beforeunload', listener); clearTimeout(timer.current); }; }, []);
-  useEffect(() => { if (api && baseline.current === null) baseline.current = serialized(); }, [api]);
-  const safeReplace = () => !api || baseline.current === serialized() || window.confirm('当前有未保存修改。确定放弃这些修改吗？建议先下载备份。');
-  async function run(action) { if (lock.current) return; lock.current = true; setBusy(true); clearTimeout(timer.current); try { await action(); } catch (e) { setStatus(e instanceof TypeError ? '网络连接失败。请检查 GitHub API 是否可达；当前画布仍保留，可先下载备份。' : e.message); } finally { lock.current = false; setBusy(false); } }
-  function applyDrawing(drawing) {
+  const refreshDirty = () => {
+    if (!api) return;
+    const content = serialized();
+    if (observed.current !== content) { observed.current = content; setRevision(v => v + 1); }
+    const changed = baseline.current !== content; dirtyRef.current = changed; setDirty(changed);
+  };
+  useEffect(() => {
+    const listener = e => { if (dirtyRef.current) { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', listener);
+    return () => { window.removeEventListener('beforeunload', listener); clearTimeout(timer.current); };
+  }, []);
+  useEffect(() => {
+    if (!api || startup.current) return;
+    startup.current = true; baseline.current = serialized(); observed.current = baseline.current;
+    (async () => {
+      try {
+        const saved = await readConnection(route);
+        if (saved) { setRemembered(true); await connectWith(saved, false); }
+        else { setStatus('首次使用，请连接你的 GitHub 图稿仓库。'); setPanel('connect'); }
+      } catch { setStatus('此环境无法读取已记住的连接，请连接一次；也可使用独立窗口。'); setPanel('connect'); }
+      finally { setChecking(false); }
+    })();
+  }, [api]);
+  useEffect(() => {
+    if (!canAutoSave({ connected, dirty, busy, saving, paused, readonly, loaded: loaded.current, path, identity: client.current?.identity })) return;
+    const timeout = setTimeout(() => save(true), 3000);
+    return () => clearTimeout(timeout);
+  }, [connected, dirty, busy, saving, paused, revision, path]);
+  const safeReplace = () => !api || baseline.current === serialized() || window.confirm('当前修改尚未保存。确定放弃吗？可以先下载备份。');
+  const showError = e => {
+    setStatus(e instanceof TypeError ? '网络连接失败。修改仍在当前页面，请下载备份或稍后重试保存。' : e.message);
+    setPaused(true);
+    if (e.status === 401) { client.current = null; setConnected(false); setRemembered(false); setPanel('connect'); forgetConnection().catch(() => {}); }
+  };
+  async function run(action) {
+    if (lock.current) return;
+    lock.current = true; setBusy(true); clearTimeout(timer.current);
+    try { await action(); } catch (e) { showError(e); }
+    finally { lock.current = false; setBusy(false); }
+  }
+  async function applyDrawing(drawing) {
     const restored = restore(drawing, null, null);
     api.resetScene(); api.addFiles(Object.values(restored.files || {}));
     api.updateScene({ elements: restored.elements, appState: { ...restored.appState, isLoading: false } });
+    // Wait for React's scene/app-state update before capturing the clean baseline.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     api.scrollToContent(restored.elements, { fitToContent: true });
-    baseline.current = serialized(); dirtyRef.current = false; setDirty(false);
+    baseline.current = serialized(); observed.current = baseline.current; dirtyRef.current = false; setDirty(false);
   }
   function updateCanvasLink(file) {
     setCanvasPath(file);
     history.replaceState(null, '', canvasURL(location.href, { file, owner, repo, branch, readonly }));
-    document.title = file.split('/').pop() + ' · 私有画布';
+    document.title = file.split('/').pop().replace(/\.excalidraw$/, '') + ' · 私有画布';
   }
   async function loadDrawing(file, connection = client.current) {
-    const valid = validatePath(file.trim());
-    const result = await connection.load(valid);
-    applyDrawing(result.drawing);
+    const valid = validatePath(file.trim()); const result = await connection.load(valid);
+    await applyDrawing(result.drawing);
     loaded.current = { path: valid, sha: result.sha, identity: connection.identity };
-    setPath(valid); updateCanvasLink(valid); setStatus('已打开画布 · ' + valid);
+    setPath(valid); updateCanvasLink(valid); setReady(true); setPaused(false); setPanel(null); setStatus(readonly ? '只读画布' : '已同步 · 修改后自动保存');
   }
-  async function connect(event) { event.preventDefault(); const token = tokenInput.current.value.trim(); tokenInput.current.value = ''; const openLinkedCanvas = !!initialPath && path === initialPath && safeReplace(); await run(async () => { const next = createGithub({ owner, repo, branch, token }); await next.verify(); const list = await next.list(); client.current = next; loaded.current = null; setConnected(true); setFiles(list.paths); setSettings(false); setStatus(list.truncated ? '已连接，文件列表不完整；可手动输入完整路径。' : '已连接私有仓库。选择图稿后点击加载。'); if (openLinkedCanvas) await loadDrawing(initialPath, next); }); }
-  function disconnect() { client.current = null; loaded.current = null; setConnected(false); setFiles([]); if (tokenInput.current) tokenInput.current.value = ''; setSettings(true); setStatus('已清除连接令牌。画布仍保留在本页，关闭页面后清除。'); }
-  async function load() { if (!safeReplace()) return; await run(() => loadDrawing(path)); }
-  async function save() { await run(async () => { const valid = validatePath(path.trim()); const snapshot = serialized(); const previous = loaded.current; const sha = previous?.path === valid && previous.identity === client.current.identity ? previous.sha : undefined; const result = await client.current.save(valid, snapshot, sha); loaded.current = { path: valid, sha: result.content.sha, identity: client.current.identity }; baseline.current = snapshot; refreshDirty(); setPath(valid); updateCanvasLink(valid); setFiles(old => old.includes(valid) ? old : [...old, valid].sort()); setStatus('画布已保存，可复制专属链接嵌入 Notion · ' + new Date().toLocaleTimeString()); }); }
-  function download() { const blob = new Blob([serialized()], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = path.split('/').pop() || '未命名.excalidraw'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); setStatus('已下载备份；远端保存状态未改变。'); }
-  async function importFile(event) { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !safeReplace()) return; await run(async () => { if (file.size > MAX_BYTES) throw new Error('图稿超过 20 MB。'); applyDrawing(parseDrawing(await file.text())); loaded.current = null; setPath(file.name.endsWith('.excalidraw') ? file.name : '导入.excalidraw'); baseline.current = ''; refreshDirty(); setStatus('已导入本地图稿。请确认文件名后保存到私有仓库。'); }); }
+  async function connectWith(credentials, persist) {
+    await run(async () => {
+      const next = createGithub(credentials); await next.verify();
+      client.current = next; loaded.current = null; setConnected(true); setPaused(false);
+      let storageNotice = '';
+      if (persist) {
+        try { await rememberConnection(credentials); setRemembered(true); }
+        catch { setRemembered(false); storageNotice = '浏览器阻止了记住连接，本次仍可使用；刷新后需重新连接。'; }
+      }
+      if (path && safeReplace()) await loadDrawing(path, next);
+      else { setPanel('files'); setStatus('已连接。选择或新建一张画布。'); }
+      try { const list = await next.list(); setFiles(list.paths); if (list.truncated) setStatus('文件列表较多，可输入完整路径打开。'); }
+      catch { if (!ready && !path) setStatus('已连接，但列表加载失败，可输入图稿路径打开。'); }
+      if (storageNotice) setStatus(storageNotice);
+    });
+  }
+  async function connect(event) {
+    event.preventDefault(); const token = tokenInput.current.value.trim(); tokenInput.current.value = '';
+    let forgetFailed = false;
+    if (!remember) { try { await forgetConnection(); setRemembered(false); } catch { forgetFailed = true; } }
+    await connectWith({ owner, repo, branch, token }, remember);
+    if (forgetFailed) setStatus('本次连接仅保留在页面中。如本浏览器曾记住连接，请在浏览器设置中清除旧的网站数据。');
+  }
+  async function disconnect() {
+    if (!safeReplace()) return;
+    await run(async () => {
+      let cleared = true; try { await forgetConnection(); } catch { cleared = false; }
+      client.current = null; loaded.current = null; setConnected(false); setRemembered(false); setReady(false); setPaused(false); setFiles([]);
+      await applyDrawing({ type: 'excalidraw', version: 2, elements: [], appState: {}, files: {} });
+      setPanel('connect'); setStatus(cleared ? '已退出并清除此浏览器的连接记录。' : '本页已退出，但无法清除本机记录。请在浏览器设置中清除本站数据，再重新打开。');
+    });
+  }
+  async function load(file = path) { if (!safeReplace()) return; await run(() => loadDrawing(file)); }
+  async function createCanvas(event) {
+    event.preventDefault(); if (!safeReplace()) return;
+    await run(async () => {
+      const file = createDrawingPath(newTitle, crypto.randomUUID().slice(0, 8));
+      const text = JSON.stringify({ type: 'excalidraw', version: 2, source: location.origin, elements: [], appState: {}, files: {} });
+      const result = await client.current.save(file, text);
+      await applyDrawing(parseDrawing(text));
+      loaded.current = { path: file, sha: result.content.sha, identity: client.current.identity };
+      setPath(file); updateCanvasLink(file); setFiles(old => [...old, file].sort()); setReady(true); setPanel(null); setPaused(false); setNewTitle(''); setStatus('画布已创建 · 修改后自动保存');
+    });
+  }
+  async function save(automatic = false) {
+    if (lock.current || !client.current || readonly) return;
+    if (automatic && !canAutoSave({ connected, dirty: baseline.current !== serialized(), busy, saving, paused, readonly, loaded: loaded.current, path, identity: client.current.identity })) return;
+    lock.current = true; setSaving(true); clearTimeout(timer.current);
+    try {
+      const valid = validatePath(path.trim()), snapshot = serialized(), previous = loaded.current;
+      const sha = previous?.path === valid && previous.identity === client.current.identity ? previous.sha : undefined;
+      const result = await client.current.save(valid, snapshot, sha);
+      loaded.current = { path: valid, sha: result.content.sha, identity: client.current.identity };
+      baseline.current = snapshot; setPath(valid); updateCanvasLink(valid); setReady(true); setPaused(false);
+      setFiles(old => old.includes(valid) ? old : [...old, valid].sort());
+      setStatus('已保存到 GitHub · ' + new Date().toLocaleTimeString());
+    } catch (e) { showError(e); }
+    finally { lock.current = false; setSaving(false); refreshDirty(); }
+  }
+  function download() {
+    const url = URL.createObjectURL(new Blob([serialized()], { type: 'application/json' }));
+    const a = document.createElement('a'); a.href = url; a.download = path.split('/').pop() || '未命名.excalidraw'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function importFile(event) {
+    const file = event.target.files?.[0]; event.target.value = ''; if (!file || !safeReplace()) return;
+    await run(async () => {
+      if (file.size > MAX_BYTES) throw new Error('图稿超过 20 MB。');
+      await applyDrawing(parseDrawing(await file.text())); loaded.current = null;
+      setPath(file.name.endsWith('.excalidraw') ? file.name : '导入.excalidraw'); baseline.current = ''; refreshDirty(); setReady(true); setPaused(true);
+      setStatus('已导入。请确认文件名并首次保存，之后自动同步。');
+    });
+  }
   function makeLink() { return canvasURL(location.href, { file: canvasPath, owner, repo, branch, readonly }); }
-  async function copyLink() { try { await navigator.clipboard.writeText(makeLink()); setStatus('已复制这张画布的专属链接。连接仓库后会自动打开；链接不含令牌或图稿。'); } catch { setStatus('复制受浏览器限制，请从“独立窗口”链接复制地址。'); } }
+  async function copyLink() {
+    try { await navigator.clipboard.writeText(makeLink()); setStatus('画布链接已复制，可直接用于 Notion Embed。'); }
+    catch { setStatus('复制被浏览器限制，请复制地址栏中的画布网址。'); }
+  }
+  const blocked = busy || saving || checking;
+  const name = canvasPath ? canvasPath.split('/').pop().replace(/\.excalidraw$/, '').replace(/-[a-f0-9]{8}$/, '') : '我的画布';
+  const stateLabel = checking ? '正在连接' : busy ? '正在加载' : saving ? '正在保存…' : paused ? '同步已暂停' : dirty ? '等待保存…' : ready ? '已同步 GitHub' : connected ? '已连接' : '未连接';
   return <div className="shell">
-    <header><div className="brand"><span className="logo">✎</span><div><strong title={canvasPath || '私有画布'}>{canvasPath ? canvasPath.split('/').pop().replace(/\.excalidraw$/, '') : '私有画布'}</strong><small>EXCALIDRAW · GITHUB</small></div></div><span className={'badge ' + (connected ? 'online' : '')}>{connected ? '私有仓库已连接' : '仅在本页'}{dirty ? ' · 未保存' : ''}</span><div className="header-actions"><button onClick={() => setSettings(!settings)} disabled={busy}>连接设置</button><a href={makeLink()} target="_blank" rel="noopener noreferrer">独立窗口 ↗</a></div></header>
-    {settings && <section className="connection"><form onSubmit={connect}><label>GitHub 用户<input value={owner} onChange={e => setOwner(e.target.value)} disabled={connected || busy}/></label><label>私有仓库<input value={repo} onChange={e => setRepo(e.target.value)} disabled={connected || busy}/></label><label className="branch">分支<input value={branch} onChange={e => setBranch(e.target.value)} disabled={connected || busy}/></label>{!connected && <label className="token">Fine-grained PAT<input ref={tokenInput} type="password" autoComplete="off" placeholder="仅本页内存保存" required disabled={busy} spellCheck="false"/></label>}{connected ? <button type="button" onClick={disconnect} disabled={busy}>断开并清除令牌</button> : <button className="primary" disabled={busy || !api}>连接仓库</button>}</form><p>令牌只授权这个私有仓库的 Contents 读写。刷新后需重新输入；不会写入网站、链接或浏览器存储。<a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">创建令牌 ↗</a></p></section>}
-    <nav className="toolbar" aria-label="图稿操作"><input className="path" aria-label="图稿路径" list="drawings" value={path} onChange={e => setPath(e.target.value)} placeholder="选择或输入：文件夹/图稿.excalidraw" disabled={busy}/><datalist id="drawings">{files.map(f => <option key={f} value={f}/>)}</datalist><button onClick={load} disabled={!connected || !api || busy || !path}>加载</button><button className="primary" onClick={save} disabled={!connected || !api || busy || !path || readonly}>保存到 GitHub</button><button onClick={download} disabled={!api || busy}>下载备份</button><label className="button">导入<input type="file" accept=".excalidraw,application/json" onChange={importFile} disabled={!api || busy || readonly} hidden/></label><button onClick={copyLink} disabled={!canvasPath || busy}>复制画布链接</button></nav>
-    <div className="status" role="status" aria-live="polite"><span className="dot"/>{busy ? '正在与 GitHub 同步，请稍候…' : status}{readonly && ' · 只读显示模式'}</div>
-    <main className="canvas"><Excalidraw excalidrawAPI={setApi} langCode="zh-CN" viewModeEnabled={readonly || busy} onChange={() => { clearTimeout(timer.current); if (!lock.current) timer.current = setTimeout(refreshDirty, 350); }} validateEmbeddable={() => false} UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false, export: { saveFileToDisk: true } } }}><MainMenu><MainMenu.DefaultItems.Export/><MainMenu.DefaultItems.SaveAsImage/><MainMenu.DefaultItems.ChangeCanvasBackground/></MainMenu></Excalidraw></main>
-    <footer><span>图稿保存在你的私有 GitHub 仓库 · 点击保存才会同步</span><span>Notion 内遇到限制时，使用独立窗口</span></footer>
+    <header><div className="brand"><span className="logo">✎</span><strong title={canvasPath || name}>{name}</strong></div><span className={'badge ' + (paused ? 'warning' : connected ? 'online' : '')} role="status">{stateLabel}</span><div className="header-actions"><button onClick={copyLink} disabled={!canvasPath || busy}>复制链接</button><button onClick={() => setPanel(panel ? null : connected ? 'files' : 'connect')} disabled={blocked}>☰</button></div></header>
+    {panel && <section className="drawer" aria-label="画布管理">
+      <div className="drawer-top"><strong>{panel === 'connect' ? '连接你的 GitHub' : '我的画布'}</strong><button onClick={() => setPanel(null)}>收起 ×</button></div>
+      {panel === 'connect' ? <><p className="intro">只需设置一次。选择记住连接后，本浏览器下次打开画布会自动加载。图稿保存在你的私有仓库。</p><form onSubmit={connect} className="connect-form">
+        <details><summary>仓库设置</summary><label>GitHub 用户<input value={owner} onChange={e => setOwner(e.target.value)} disabled={connected || blocked}/></label><label>私有仓库<input value={repo} onChange={e => setRepo(e.target.value)} disabled={connected || blocked}/></label><label>分支<input value={branch} onChange={e => setBranch(e.target.value)} disabled={connected || blocked}/></label></details>
+        {!connected && <><a className="setup-link" href="https://github.com/settings/personal-access-tokens/new?name=Private%20Canvas&target_name=Guozhenyuan&expires_in=30&contents=write" target="_blank" rel="noopener noreferrer">① 在 GitHub 创建连接凭据 ↗</a><p className="help">名称、30 天有效期和 Contents 读写权限已预填。请在 Repository access 选择 Only select repositories，仅勾选 excalidraw-drawings，再点击 Generate token。不要把生成的凭据发到聊天。</p><label>② 粘贴 GitHub 生成的连接凭据<input ref={tokenInput} type="password" autoComplete="off" required disabled={blocked} spellCheck="false"/></label><label className="remember"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)}/>在此浏览器记住连接（最多 30 天）</label><p className="help">这会将访问凭据保存在本机浏览器中；其他使用此浏览器的人也可能访问。换设备、令牌过期或清除网站数据后需重新连接。</p><button className="primary" disabled={blocked || !api}>连接并打开画布</button></>}
+        {connected && <><p>{remembered ? '本浏览器已记住连接。' : '当前连接仅在本次页面中保留。'}</p><button type="button" onClick={disconnect} disabled={blocked}>退出并清除连接</button></>}
+      </form></> : <>
+        {!readonly && <form className="new-canvas" onSubmit={createCanvas}><input aria-label="新画布名称" placeholder="为新画布起个名字" value={newTitle} onChange={e => setNewTitle(e.target.value)} disabled={blocked}/><button className="primary" disabled={blocked || !connected}>新建画布</button></form>}
+        <div className="file-list">{files.map(file => <button key={file} className={file === canvasPath ? 'selected' : ''} onClick={() => load(file)} disabled={blocked}>{file.replace(/\.excalidraw$/, '')}</button>)}</div>
+        <details><summary>导入、备份与另存为</summary><div className="tools"><input aria-label="图稿路径" value={path} onChange={e => setPath(e.target.value)} placeholder="文件夹/图稿.excalidraw" disabled={blocked}/><button onClick={() => load()} disabled={!connected || !api || blocked || !path}>打开</button><button onClick={() => save()} disabled={!connected || !api || blocked || !path || readonly}>保存到这个路径</button><button onClick={download} disabled={!api || busy}>下载备份</button><label className="button">导入图稿<input type="file" accept=".excalidraw,application/json" onChange={importFile} disabled={!api || blocked || readonly} hidden/></label></div></details>
+        <div className="drawer-bottom"><button onClick={() => setPanel('connect')} disabled={blocked}>账户与连接</button><a href={makeLink()} target="_blank" rel="noopener noreferrer">独立窗口 ↗</a></div>
+      </>}
+    </section>}
+    <main className="canvas"><Excalidraw excalidrawAPI={setApi} langCode="zh-CN" viewModeEnabled={readonly || busy || checking || !ready} onChange={() => { clearTimeout(timer.current); if (!busy && !checking && ready) timer.current = setTimeout(refreshDirty, 250); }} validateEmbeddable={() => false} UIOptions={{ canvasActions: { saveToActiveFile: false, loadScene: false, export: { saveFileToDisk: true } } }}><MainMenu><MainMenu.DefaultItems.Export/><MainMenu.DefaultItems.SaveAsImage/><MainMenu.DefaultItems.ChangeCanvasBackground/></MainMenu></Excalidraw>
+      {!ready && !panel && <div className="welcome"><h1>{checking ? '正在打开画布…' : route.file ? name : '每个想法，一张画布。'}</h1><p>{checking ? '正在读取此浏览器记住的连接。' : connected ? '新建画布，或者打开已有图稿。' : '连接一次 GitHub，随后自动保存你的修改。'}</p>{!checking && <button className="primary" onClick={() => setPanel(connected ? 'files' : 'connect')}>{connected ? '打开我的画布' : '连接 GitHub'}</button>}</div>}
+    </main>
+    <footer><span role="status" aria-live="polite">{status}</span>{paused && ready && <><button onClick={() => save()} disabled={blocked || !connected || readonly}>重试保存</button><button onClick={download}>下载备份</button></>}</footer>
   </div>;
 }
 createRoot(document.getElementById('root')).render(<App/>);

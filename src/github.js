@@ -24,7 +24,7 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const identity = `${owner}/${repo}@${branch}`;
   async function request(suffix, options = {}) {
-    const response = await fetcher(base + suffix, { ...options, credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+    const response = await fetcher(base + suffix, { ...options, signal: AbortSignal.timeout(30000), credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
     if (!response.ok) {
       const messages = { 401: '令牌无效或已过期，请重新连接。', 403: '权限不足或请求受限。请检查令牌所选仓库、Contents 权限、组织审批和 API 限额。', 404: '文件、分支或仓库不存在，或令牌没有访问权限。', 409: '远端已变化，保存被阻止。请下载当前备份，再加载远端版本合并。', 422: '保存被拒绝，可能文件已存在或分支受保护。请先备份并重新加载。' };
       const error = new Error(messages[response.status] || `GitHub 请求失败（${response.status}），请重试。`); error.status = response.status; throw error;
