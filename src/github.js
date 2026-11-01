@@ -23,6 +23,7 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
   if (!token.startsWith('github_pat_')) throw new Error('请使用 fine-grained PAT（以 github_pat_ 开头）。');
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const identity = `${owner}/${repo}@${branch}`;
+  const pending = new Map();
   async function request(suffix, options = {}) {
     const response = await fetcher(base + suffix, { ...options, signal: AbortSignal.timeout(30000), credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
     if (!response.ok) {
@@ -37,7 +38,7 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
     async verify() { const result = await request(''); if (!result.private) throw new Error('为保护图稿，本站只连接私有仓库。'); return result; },
     async list() {
       const tree = await request(`/git/trees/${encodeURIComponent(branch)}?recursive=1`);
-      return { paths: tree.tree.filter(x => x.type === 'blob' && x.path.endsWith('.excalidraw')).map(x => x.path), truncated: !!tree.truncated };
+      return { paths: tree.tree.filter(x => x.type === 'blob' && x.path.endsWith('.excalidraw')).map(x => x.path), directories: tree.tree.filter(x => x.type === 'tree').map(x => x.path), truncated: !!tree.truncated };
     },
     async load(path) {
       const meta = await request(fileURL(path) + `?ref=${encodeURIComponent(branch)}`);
@@ -48,14 +49,48 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
       const text = fromBase64(blob.content); return { drawing: parseDrawing(text), sha: meta.sha };
     },
     async save(path, text, sha) {
-      parseDrawing(text);
+      validatePath(path); parseDrawing(text);
       const content = toBase64(text);
-      if (!sha) {
-        try { await request(fileURL(path) + `?ref=${encodeURIComponent(branch)}`); }
-        catch (e) { if (e.status !== 404) throw e; return request(fileURL(path), { method: 'PUT', body: JSON.stringify({ message: `Create drawing: ${path}`, content, branch }) }); }
-        throw new Error('这个路径已经有图稿。请先加载它，或换一个新文件名。');
+      const callerSHA = sha;
+      const metadata = () => request(fileURL(path) + `?ref=${encodeURIComponent(branch)}`);
+      const matches = async (meta, expected) => {
+        if (meta.type !== 'file' || !meta.sha || meta.size > MAX_BYTES) return false;
+        const blob = await request(`/git/blobs/${meta.sha}`);
+        return blob.encoding === 'base64' && fromBase64(blob.content) === expected;
+      };
+      const conflict = () => Object.assign(new Error('此图稿在其他窗口或 GitHub 中已修改。请另存副本，或下载备份后重新打开远端版本。'), { status: 409 });
+      // A previous request may have committed even though its response was lost.
+      // Only adopt a new SHA when that exact attempted content is confirmed.
+      const previous = pending.get(path);
+      if (previous && (previous.sha === sha || previous.callerSHA === sha)) {
+        sha = previous.sha;
+        let meta;
+        try { meta = await metadata(); } catch (e) { if (e.status !== 404) throw e; }
+        if (meta && await matches(meta, previous.text)) {
+          sha = meta.sha;
+          if (previous.text === text) { pending.delete(path); return { content: { sha }, recovered: true }; }
+        } else if (meta ? meta.sha !== sha : !!sha) { throw conflict(); }
+        pending.delete(path);
       }
-      return request(fileURL(path), { method: 'PUT', body: JSON.stringify({ message: `Update drawing: ${path}`, content, sha, branch }) });
+      if (!sha) {
+        let exists = false;
+        try { await metadata(); exists = true; } catch (e) { if (e.status !== 404) throw e; }
+        if (exists) throw new Error('这个目录已存在同名图稿。请修改文件名，或先打开已有图稿再编辑。');
+      }
+      pending.set(path, { text, sha, callerSHA });
+      try {
+        const result = await request(fileURL(path), { method: 'PUT', body: JSON.stringify({ message: `${sha ? 'Update' : 'Create'} drawing: ${path}`, content, ...(sha ? { sha } : {}), branch }) });
+        if (!result.content?.sha) throw new Error('GitHub 保存结果不完整，请重试以核对是否已保存。');
+        pending.delete(path); return result;
+      } catch (error) {
+        if ([401, 403, 404].includes(error.status)) { pending.delete(path); throw error; }
+        try {
+          const meta = await metadata();
+          if (await matches(meta, text)) { pending.delete(path); return { content: { sha: meta.sha }, recovered: true }; }
+        } catch { /* Keep the original error and pending snapshot for a later retry. */ }
+        if (error.status === 409) throw conflict();
+        throw error;
+      }
     }
   };
 }

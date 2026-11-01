@@ -8,9 +8,45 @@ test('Unicode and large embedded images round-trip without corruption',()=>{cons
 test('unsafe paths and non-drawings rejected',()=>{for(const p of ['../x.excalidraw','/x.excalidraw','a//b.excalidraw','x.txt'])assert.throws(()=>validatePath(p));assert.equal(validatePath('文件夹/思考.excalidraw'),'文件夹/思考.excalidraw');assert.throws(()=>parseDrawing('{"elements":[]}'))});
 test('public repository connection rejected',async()=>{const c=createGithub({...config,fetcher:async()=>reply({private:false})});await assert.rejects(c.verify(),/私有仓库/)});
 test('large files load from immutable SHA; token only in Authorization',async()=>{let calls=[];const c=createGithub({...config,fetcher:async(url,options)=>{calls.push({url,options});return calls.length===1?reply({type:'file',sha:'oldsha',size:1100000,encoding:'none'}):reply({encoding:'base64',content:toBase64(drawing)})}});const loaded=await c.load('文件夹/思考.excalidraw');assert.equal(loaded.sha,'oldsha');assert.deepEqual(loaded.drawing,JSON.parse(drawing));assert.match(calls[1].url,/git\/blobs\/oldsha$/);assert.ok(calls[0].url.includes(encodeURIComponent('思考.excalidraw')));for(const call of calls){assert.ok(!call.url.includes(config.token));assert.equal(call.options.headers.Authorization,`Bearer ${config.token}`);assert.equal(call.options.credentials,'omit');assert.equal(call.options.redirect,'error');assert.equal(call.options.cache,'no-store')}});
-test('existing un-loaded file cannot be overwritten',async()=>{let calls=0;const c=createGithub({...config,fetcher:async()=>{calls++;return reply({sha:'exists'})}});await assert.rejects(c.save('a.excalidraw',drawing),/已经有图稿/);assert.equal(calls,1)});
+test('existing un-loaded file cannot be overwritten',async()=>{let calls=0;const c=createGithub({...config,fetcher:async()=>{calls++;return reply({sha:'exists'})}});await assert.rejects(c.save('a.excalidraw',drawing),/已存在同名图稿/);assert.equal(calls,1)});
 test('new file created only after confirmed missing file',async()=>{let calls=[];const c=createGithub({...config,fetcher:async(url,options)=>{calls.push(options);return calls.length===1?reply({},404):reply({content:{sha:'new'}})}});await c.save('新图稿.excalidraw',drawing);assert.equal(calls[1].method,'PUT');assert.equal(JSON.parse(calls[1].body).sha,undefined);assert.equal(fromBase64(JSON.parse(calls[1].body).content),drawing)});
-test('stale SHA preserves conflict and never retries overwrite',async()=>{let calls=[];const c=createGithub({...config,fetcher:async(url,options)=>{calls.push(options);return reply({},409)}});await assert.rejects(c.save('a.excalidraw',drawing,'stale'),/远端已变化/);assert.equal(calls.length,1);assert.equal(JSON.parse(calls[0].body).sha,'stale')});
+test('stale SHA preserves conflict and never retries overwrite',async()=>{let calls=[];const c=createGithub({...config,fetcher:async(url,options)=>{calls.push(options);return reply({},409)}});await assert.rejects(c.save('a.excalidraw',drawing,'stale'),/已修改/);assert.equal(calls.filter(call=>call.method==='PUT').length,1);assert.equal(JSON.parse(calls[0].body).sha,'stale')});
 test('permission failure never falls through into create',async()=>{let calls=0;const c=createGithub({...config,fetcher:async()=>{calls++;return reply({},403)}});await assert.rejects(c.save('a.excalidraw',drawing),/权限不足/);assert.equal(calls,1)});
 test('oversized and malformed files rejected',()=>{assert.throws(()=>toBase64('x'.repeat(21*1024*1024)),/20 MB/);assert.throws(()=>parseDrawing('not-json'),/JSON/)});
-test('recursive file listing filters non-drawings and reports truncation',async()=>{const c=createGithub({...config,fetcher:async()=>reply({tree:[{type:'blob',path:'a/中文.excalidraw'},{type:'blob',path:'README.md'},{type:'tree',path:'dir'}],truncated:true})});assert.deepEqual(await c.list(),{paths:['a/中文.excalidraw'],truncated:true})});
+test('recursive file listing filters non-drawings and reports truncation',async()=>{const c=createGithub({...config,fetcher:async()=>reply({tree:[{type:'blob',path:'a/中文.excalidraw'},{type:'blob',path:'README.md'},{type:'tree',path:'dir'}],truncated:true})});assert.deepEqual(await c.list(),{paths:['a/中文.excalidraw'],directories:['dir'],truncated:true})});
+test('lost successful PUT response is reconciled without a second write',async()=>{
+ let writes=0;const c=createGithub({...config,fetcher:async(url,options)=>{
+  if(options.method==='PUT'){writes++;throw new TypeError('connection lost')}
+  return url.includes('/git/blobs/')?reply({encoding:'base64',content:toBase64(drawing)}):reply({type:'file',sha:'committed',size:drawing.length});
+ }});
+ const result=await c.save('a.excalidraw',drawing,'old');assert.equal(result.content.sha,'committed');assert.equal(result.recovered,true);assert.equal(writes,1);
+});
+test('after offline response loss, later edits use the confirmed SHA, not a forced overwrite',async()=>{
+ let offline=true,writes=[];const newer=drawing+' ';
+ const c=createGithub({...config,fetcher:async(url,options)=>{
+  if(options.method==='PUT'){writes.push(JSON.parse(options.body));if(offline)throw new TypeError('offline');return reply({content:{sha:'newest'}})}
+  if(offline)throw new TypeError('offline');
+  return url.includes('/git/blobs/')?reply({encoding:'base64',content:toBase64(drawing)}):reply({type:'file',sha:'committed',size:drawing.length});
+ }});
+ await assert.rejects(c.save('a.excalidraw',drawing,'old'));
+ offline=false;
+ const result=await c.save('a.excalidraw',newer,'old');
+ assert.equal(result.content.sha,'newest');assert.equal(writes[1].sha,'committed');assert.equal(fromBase64(writes[1].content),newer);
+});
+test('a different remote edit is never overwritten during uncertain-save recovery',async()=>{
+ let writes=0;const c=createGithub({...config,fetcher:async(url,options)=>{
+  if(options.method==='PUT'){writes++;return reply({},409)}
+  return url.includes('/git/blobs/')?reply({encoding:'base64',content:toBase64(drawing+' ')}):reply({type:'file',sha:'someone-else',size:drawing.length});
+ }});
+ await assert.rejects(c.save('a.excalidraw',drawing,'old'),/已修改/);
+ await assert.rejects(c.save('a.excalidraw',drawing,'old'),/已修改/);
+ assert.equal(writes,1);
+});
+test('new-file timeout is confirmed without duplicate creation',async()=>{
+ let exists=false,writes=0;const c=createGithub({...config,fetcher:async(url,options)=>{
+  if(options.method==='PUT'){writes++;exists=true;throw Object.assign(new Error('timeout'),{name:'TimeoutError'})}
+  if(!exists)return reply({},404);
+  return url.includes('/git/blobs/')?reply({encoding:'base64',content:toBase64(drawing)}):reply({type:'file',sha:'created',size:drawing.length});
+ }});
+ assert.equal((await c.save('目录/新图.excalidraw',drawing)).content.sha,'created');assert.equal(writes,1);
+});
