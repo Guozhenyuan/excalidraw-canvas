@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import FileList from './FileList';
+import DirectoryCreator from './DirectoryCreator';
 import { directoryOf, filenameOf, directoryChoices, drawingPath, parseGithubLocation } from './paths';
-export default function RepositoryFiles({ directories, files, versions, renameFile, deleteFile, folder, setFolder, newTitle, setNewTitle, saveName, setSaveName, activePath, ready, blocked, readonly, createCanvas, saveAs, load, refresh, refreshing, listNotice, config, download, importFile }) {
+export default function RepositoryFiles({ directories, files, versions, renameFile, deleteFile, folder, setFolder, newTitle, setNewTitle, saveName, setSaveName, activePath, ready, blocked, readonly, createDirectory, createCanvas, saveAs, load, refresh, refreshing, listNotice, config, download, importFile }) {
   const [address, setAddress] = useState(''), [addressError, setAddressError] = useState(''), [locatedFile, setLocatedFile] = useState('');
   const options = directoryChoices(directories, files, folder);
   const visible = files.filter(file => directoryOf(file) === folder);
@@ -19,6 +20,7 @@ export default function RepositoryFiles({ directories, files, versions, renameFi
   return <>
     <div className="current-path">当前画布保存到<strong>{activePath || '尚未保存到 GitHub'}</strong></div>
     <div className="directory-picker"><label>GitHub 保存目录<select value={folder} onChange={e => setFolder(e.target.value)} disabled={blocked}>{options.map(dir => <option key={dir} value={dir}>{dir ? '/' + dir + '/' : '/（仓库根目录）'}</option>)}</select></label><button onClick={refresh} disabled={blocked || refreshing}>{refreshing ? '读取中…' : '刷新目录'}</button></div>
+    {!readonly && <DirectoryCreator parent={folder} directories={options} blocked={blocked} createDirectory={createDirectory}/>}
     {listNotice && <p className="help" role="status">{listNotice}</p>}
     <details><summary>粘贴 GitHub 地址定位</summary><form className="address-form" onSubmit={locate}><input aria-label="GitHub 文件或目录地址" placeholder="https://github.com/…/tree/main/目录" value={address} onChange={e => { setAddress(e.target.value); setLocatedFile(''); }} disabled={blocked}/><button disabled={blocked || !address.trim()}>定位</button></form>{addressError && <p className="field-error" role="alert">{addressError}</p>}{locatedFile && <button onClick={() => load(locatedFile)} disabled={blocked}>打开链接中的图稿</button>}<p className="help">仅定位当前仓库和分支。选择已有文件后，请先打开再编辑。</p></details>
     <FileList files={files} visible={visible} versions={versions} directories={options} activePath={activePath} blocked={blocked} readonly={readonly} load={load} renameFile={renameFile} deleteFile={deleteFile}/>

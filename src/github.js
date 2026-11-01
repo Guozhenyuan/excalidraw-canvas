@@ -1,4 +1,5 @@
 import { createFileOperations } from './fileOperations.js';
+import { createDirectoryClient } from './directories.js';
 export const MAX_BYTES = 20 * 1024 * 1024;
 export function validatePath(path) {
   if (!path || !path.endsWith('.excalidraw') || path.startsWith('/') || path.split('/').some(p => !p || p === '.' || p === '..') || /[\\\x00-\x1f]/.test(path)) throw new Error('请输入有效的 .excalidraw 文件路径，不可包含 .. 或空目录。');
@@ -45,6 +46,7 @@ export function createGithub({ owner, repo, branch = 'main', token, fetcher = fe
   const fileURL = path => `/contents/${validatePath(path).split('/').map(encodeURIComponent).join('/')}`;
   return {
     identity,
+    createDirectory: createDirectoryClient({ request, branch }),
     ...createFileOperations({ request, branch, validatePath }),
     async verify() { const result = await request(''); if (!result.private) throw new Error('为保护图稿，本站只连接私有仓库。'); return result; },
     async list() {

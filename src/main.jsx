@@ -7,7 +7,7 @@ import { createGithub, parseDrawing, validatePath, MAX_BYTES } from './github';
 import { canvasURL, readRoute } from './routing';
 import { readConnection, rememberConnection, forgetConnection } from './session';
 import { canAutoSave } from './autosave';
-import { directoryOf, filenameOf, drawingPath } from './paths';
+import { directoryOf, filenameOf, drawingPath, directoryChoices } from './paths';
 import RepositoryFiles from './RepositoryFiles';
 import SyncControls from './SyncControls';
 import { synchronizeRemote, SYNC_INTERVAL, retryDelay } from './sync';
@@ -209,12 +209,20 @@ function App() {
     } catch (e) { showError(e); }
     finally { lock.current = false; setSaving(false); refreshDirty(); }
   }
-  async function manageFile(action) {
+  async function manageFile(action, pauseOnError = true) {
     if (lock.current || !client.current || readonly) throw new Error('请等待当前操作完成后重试。');
     lock.current = true; syncEpoch.current++; setBusy(true); clearTimeout(timer.current);
     try { return await action(); }
-    catch (e) { showError(e); throw e; }
+    catch (e) { if (pauseOnError || e.status === 401) showError(e); else setStatus(e.message); throw e; }
     finally { lock.current = false; setBusy(false); refreshDirty(); }
+  }
+  async function createDirectory(directory) {
+    return manageFile(async () => {
+      const result = await client.current.createDirectory(directory);
+      setDirectories(old => directoryChoices([...old, result.path], []));
+      setFolder(result.path);
+      setStatus((result.existed ? '已选中已有目录：' : '已创建目录：') + result.path + '。可以在此新建画布或另存图稿。');
+    }, false);
   }
   async function renameFile(from, to, expectedSHA) {
     return manageFile(async () => {
@@ -281,7 +289,7 @@ function App() {
         {connected && <><p>{remembered ? '本浏览器已记住连接。' : '当前连接仅在本次页面中保留。'}</p><button type="button" onClick={disconnect} disabled={blocked}>退出并清除连接</button></>}
       </form></> : <>
         <SyncControls enabled={syncEnabled} setEnabled={setSyncEnabled} connected={connected} syncing={syncing} blocked={blocked} lastChecked={lastChecked} notice={syncNotice} synchronize={() => synchronize(true)}/>
-        <RepositoryFiles directories={directories} files={files} versions={versions} renameFile={renameFile} deleteFile={deleteFile} folder={folder} setFolder={setFolder} newTitle={newTitle} setNewTitle={setNewTitle} saveName={saveName} setSaveName={setSaveName} activePath={path} ready={ready} blocked={blocked} readonly={readonly} createCanvas={createCanvas} saveAs={file => save(false, file)} load={load} refresh={() => refreshRepository()} refreshing={refreshing} listNotice={listNotice} config={{ owner, repo, branch }} download={download} importFile={importFile}/>
+        <RepositoryFiles directories={directories} files={files} versions={versions} renameFile={renameFile} deleteFile={deleteFile} folder={folder} setFolder={setFolder} newTitle={newTitle} setNewTitle={setNewTitle} saveName={saveName} setSaveName={setSaveName} activePath={path} ready={ready} blocked={blocked} readonly={readonly} createDirectory={createDirectory} createCanvas={createCanvas} saveAs={file => save(false, file)} load={load} refresh={() => refreshRepository()} refreshing={refreshing} listNotice={listNotice} config={{ owner, repo, branch }} download={download} importFile={importFile}/>
         <div className="drawer-bottom"><button onClick={() => setPanel('connect')} disabled={blocked}>账户与连接</button><a href={makeLink()} target="_blank" rel="noopener noreferrer">独立窗口 ↗</a></div>
       </>}
     </section>}
